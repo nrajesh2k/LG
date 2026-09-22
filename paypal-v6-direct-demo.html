@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>PayPal v6 SDK — direct button render (no modal)</title>
+<style>
+  body { font-family: -apple-system, Arial, sans-serif; background: #f2f0ea; padding: 40px; }
+  .checkout-card { max-width: 420px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; }
+  #paypal-button-container { display: flex; flex-direction: column; gap: 12px; min-height: 50px; margin-top: 20px; }
+  .status { font-size: 12px; color: #777; margin-top: 16px; font-family: monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<div class="checkout-card">
+  <h3>Order total: $1,107.39</h3>
+
+  <!-- Buttons render directly here, inline on the page — no LG modal, no overlay. -->
+  <div id="paypal-button-container"></div>
+
+  <div class="status" id="status-log"></div>
+</div>
+
+<!-- PayPal JS SDK v6 -->
+<script async src="https://www.paypal.com/web-sdk/v6/core" onload="onPayPalWebSdkLoaded()"></script>
+
+<script>
+const log = (msg) => {
+  const el = document.getElementById('status-log');
+  el.textContent += msg + '\n';
+  console.log(msg);
+};
+
+const buttonContainer = document.getElementById('paypal-button-container');
+let sdkInstance = null;
+
+// --- SDK loads, then render eligible buttons directly on the page ---------
+async function onPayPalWebSdkLoaded() {
+  sdkInstance = await window.paypal.createInstance({
+    clientId: 'REPLACE_WITH_CLIENT_ID', // public, safe in front-end code
+    components: ['paypal-payments', 'venmo-payments'],
+    pageType: 'checkout',
+  });
+  log('PayPal v6 SDK ready.');
+  await renderEligibleButtons();
+}
+
+async function renderEligibleButtons() {
+  buttonContainer.innerHTML = '';
+
+  // findEligibleMethods() tells you which payment methods this buyer/cart
+  // qualifies for (PayPal, Pay Later, Venmo, cards, etc). In production,
+  // prefer fetchEligibleMethods() server-side to avoid a client round trip.
+  const eligibility = await sdkInstance.findEligibleMethods({
+    currencyCode: 'USD',
+  });
+
+  if (eligibility.isEligible('paypal')) {
+    buttonContainer.appendChild(makeButton('PayPal', 'paypal', startPayPalSession));
+  }
+  if (eligibility.isEligible('paylater')) {
+    buttonContainer.appendChild(makeButton('Pay in 4 · Pay Later', 'paylater', startPayLaterSession));
+  }
+  if (eligibility.isEligible('venmo')) {
+    buttonContainer.appendChild(makeButton('Venmo', 'venmo', startVenmoSession));
+  }
+}
+
+// Simple styled button factory
+function makeButton(label, key, onStart) {
+  const btn = document.createElement('button');
+  btn.textContent = label;
+  btn.style.cssText = 'padding:14px;border:none;border-radius:24px;font-size:15px;font-weight:700;cursor:pointer;color:#fff;background:#003087;';
+  if (key === 'paylater') btn.style.background = '#111';
+  if (key === 'venmo') btn.style.background = '#008cff';
+
+  // Click straight into the payment session — no modal to close first,
+  // no extra step before session.start(). The click itself is the only
+  // user gesture involved.
+  btn.addEventListener('click', () => {
+    onStart();
+  });
+  return btn;
+}
+
+// --- Start the relevant payment session ------------------------------------
+async function startPayPalSession() {
+  const session = sdkInstance.createPayPalOneTimePaymentSession({
+    onApprove: handleApprove,
+    onCancel: () => log('Buyer cancelled PayPal checkout.'),
+    onError: (err) => log('Error: ' + err.message),
+  });
+
+  try {
+    await session.start(
+      { presentationMode: 'auto' },
+      createOrder()
+    );
+  } catch (err) {
+    log('session.start() failed: ' + err.message);
+  }
+}
+
+async function startPayLaterSession() {
+  const session = sdkInstance.createPayPalOneTimePaymentSession({
+    onApprove: handleApprove,
+    onCancel: () => log('Buyer cancelled Pay Later checkout.'),
+  });
+  await session.start({ presentationMode: 'auto' }, createOrder());
+}
+
+async function startVenmoSession() {
+  const session = sdkInstance.createVenmoOneTimePaymentSession({
+    onApprove: handleApprove,
+  });
+  await session.start({ presentationMode: 'auto' }, createOrder());
+}
+
+// createOrder() calls YOUR backend, which calls PayPal's Orders API server-side.
+// This is a stub — replace with a real fetch() to your order-creation endpoint.
+function createOrder() {
+  log('Creating order on backend...');
+  return fetch('/api/orders', { method: 'POST' })
+    .then((res) => res.json())
+    .then((data) => data.id);
+}
+
+function handleApprove(data) {
+  log('Approved! Order ID: ' + data.orderId + ' — now capture it server-side.');
+  // POST data.orderId to your backend to capture the payment.
+}
+</script>
+
+</body>
+</html>
