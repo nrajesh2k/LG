@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>LG checkout — PayPal popup handoff demo</title>
+<style>
+  body { font-family: -apple-system, Arial, sans-serif; background: #f2f0ea; padding: 40px; }
+  .checkout-card { max-width: 420px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; }
+  .btn-paypal-continue {
+    width: 100%; padding: 14px; background: #d0192a; color: #fff; border: none;
+    border-radius: 24px; font-size: 16px; font-weight: 700; cursor: pointer;
+  }
+  /* Custom LG modal overlay — plain DOM, not a browser popup, so no gesture restrictions here */
+  #lg-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+    align-items: center; justify-content: center; z-index: 1000;
+  }
+  #lg-modal-overlay.open { display: flex; }
+  #lg-modal {
+    background: #fff; border-radius: 16px; width: 380px; padding: 28px;
+  }
+  #lg-modal h2 { font-size: 18px; margin: 0 0 4px; }
+  #lg-modal .sub { color: #777; font-size: 13px; margin-bottom: 20px; }
+  #paypal-button-container { display: flex; flex-direction: column; gap: 12px; min-height: 50px; }
+  #lg-modal-close { float: right; background: none; border: none; font-size: 18px; cursor: pointer; }
+  .status { font-size: 12px; color: #777; margin-top: 16px; font-family: monospace; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<div class="checkout-card">
+  <h3>Order total: $1,107.39</h3>
+  <button class="btn-paypal-continue" id="continue-with-paypal">Continue with PayPal</button>
+  <div class="status" id="status-log"></div>
+</div>
+
+<!-- LG's own modal. This is just HTML/CSS — opening it never touches window.open,
+     so it is never subject to popup-blocker / user-activation rules. -->
+<div id="lg-modal-overlay">
+  <div id="lg-modal">
+    <button id="lg-modal-close">✕</button>
+    <h2>Choose how to pay</h2>
+    <div class="sub">LG Electronics · $1,107.39</div>
+    <div id="paypal-button-container"></div>
+  </div>
+</div>
+
+<!-- PayPal JS SDK v6. No client id needed in the script URL for v6 — -->
+<!-- it's passed into createInstance() below instead. -->
+<script
+  async
+  src="https://www.paypal.com/web-sdk/v6/core"
+  onload="onPayPalWebSdkLoaded()"
+></script>
+
+<script>
+const log = (msg) => {
+  const el = document.getElementById('status-log');
+  el.textContent += msg + '\n';
+  console.log(msg);
+};
+
+const overlay = document.getElementById('lg-modal-overlay');
+const buttonContainer = document.getElementById('paypal-button-container');
+
+let sdkInstance = null;
+
+// --- Step 1: user clicks LG's own "Continue with PayPal" ------------------
+document.getElementById('continue-with-paypal').addEventListener('click', async () => {
+  overlay.classList.add('open');
+  log('LG modal opened. Fetching eligible payment methods...');
+  await renderEligibleButtons();
+});
+
+document.getElementById('lg-modal-close').addEventListener('click', () => {
+  overlay.classList.remove('open');
+});
+
+// --- Step 2: once the SDK loads, find eligible methods and render real ----
+// v6 SDK button components inside LG's own modal container.
+async function onPayPalWebSdkLoaded() {
+  sdkInstance = await window.paypal.createInstance({
+    clientId: 'REPLACE_WITH_CLIENT_ID', // public, safe in front-end code
+    components: ['paypal-payments', 'venmo-payments'],
+    pageType: 'checkout',
+  });
+  log('PayPal v6 SDK ready.');
+}
+
+async function renderEligibleButtons() {
+  buttonContainer.innerHTML = '';
+  if (!sdkInstance) {
+    log('SDK not ready yet — try again in a moment.');
+    return;
+  }
+
+  // findEligibleMethods() tells you which payment methods this buyer/cart
+  // qualifies for (PayPal, Pay Later, Venmo, cards, etc). In production,
+  // prefer fetchEligibleMethods() server-side to avoid a client round trip.
+  const eligibility = await sdkInstance.findEligibleMethods({
+    currencyCode: 'USD',
+  });
+
+  if (eligibility.isEligible('paypal')) {
+    buttonContainer.appendChild(makeButton('PayPal', 'paypal', startPayPalSession));
+  }
+  if (eligibility.isEligible('paylater')) {
+    buttonContainer.appendChild(makeButton('Pay in 4 · Pay Later', 'paylater', startPayLaterSession));
+  }
+  if (eligibility.isEligible('venmo')) {
+    buttonContainer.appendChild(makeButton('Venmo', 'venmo', startVenmoSession));
+  }
+}
+
+// Simple styled button factory — this is the "advanced configuration"
+// pattern: custom-styled clickable element, wired directly to a payment
+// session instead of using PayPal's default rendered button markup.
+function makeButton(label, key, onStart) {
+  const btn = document.createElement('button');
+  btn.textContent = label;
+  btn.style.cssText = 'padding:14px;border:none;border-radius:24px;font-size:15px;font-weight:700;cursor:pointer;color:#fff;background:#003087;';
+  if (key === 'paylater') btn.style.background = '#111';
+  if (key === 'venmo') btn.style.background = '#008cff';
+
+  // --- Step 3: THE CRITICAL PART -----------------------------------------
+  // This click is the real, trusted user gesture. Everything that opens a
+  // popup must happen synchronously inside this same handler — no awaited
+  // network calls, no animated modal-close, before calling session.start().
+  btn.addEventListener('click', () => {
+    overlay.classList.remove('open'); // synchronous DOM change only
+    onStart(); // must be called in the same tick to preserve user activation
+  });
+  return btn;
+}
+
+// --- Step 4: hand off to PayPal's own checkout popup -----------------------
+async function startPayPalSession() {
+  const session = sdkInstance.createPayPalOneTimePaymentSession({
+    onApprove: handleApprove,
+    onCancel: () => log('Buyer cancelled PayPal checkout.'),
+    onError: (err) => log('Error: ' + err.message),
+  });
+
+  try {
+    await session.start(
+      { presentationMode: 'auto', targetElement: document.getElementById('continue-with-paypal') },
+      createOrder()
+    );
+  } catch (err) {
+    log('session.start() failed: ' + err.message);
+  }
+}
+
+async function startPayLaterSession() {
+  const session = sdkInstance.createPayPalOneTimePaymentSession({
+    onApprove: handleApprove,
+    onCancel: () => log('Buyer cancelled Pay Later checkout.'),
+  });
+  await session.start({ presentationMode: 'auto' }, createOrder());
+}
+
+async function startVenmoSession() {
+  const session = sdkInstance.createVenmoOneTimePaymentSession({
+    onApprove: handleApprove,
+  });
+  await session.start({ presentationMode: 'auto' }, createOrder());
+}
+
+// createOrder() calls YOUR backend, which calls PayPal's Orders API server-side.
+// This is a stub — replace with a real fetch() to your order-creation endpoint.
+function createOrder() {
+  log('Creating order on backend...');
+  return fetch('/api/orders', { method: 'POST' })
+    .then((res) => res.json())
+    .then((data) => data.id);
+}
+
+function handleApprove(data) {
+  log('Approved! Order ID: ' + data.orderId + ' — now capture it server-side.');
+  // POST data.orderId to your backend to capture the payment.
+}
+</script>
+
+</body>
+</html>
